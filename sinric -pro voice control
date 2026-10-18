@@ -1,0 +1,153 @@
+
+#include <WiFi.h>
+#include <SinricPro.h>
+#include <SinricProSwitch.h>
+#include <IRremote.hpp>
+
+#define WIFI_SSID "YOUR_WIFI_NAME"
+#define WIFI_PASS "YOUR_WIFI_PASSWORD"
+
+#define APP_KEY "YOUR_APP_KEY"
+#define APP_SECRET "YOUR_APP_SECRET"
+
+#define LIGHT_ID "YOUR_LIGHT_DEVICE_ID"
+#define FAN_ID "YOUR_FAN_DEVICE_ID"
+#define SOCKET_ID "YOUR_SOCKET_DEVICE_ID"
+#define OTHER_ID "YOUR_OTHER_DEVICE_ID"
+
+const int relays[] = {16, 17, 18, 19};
+const int buttons[] = {25, 26, 27, 32};
+const int IR_PIN = 23;
+
+const int RELAY_ON = LOW;
+const int RELAY_OFF = HIGH;
+
+const char* ids[] = {
+  LIGHT_ID, FAN_ID, SOCKET_ID, OTHER_ID
+};
+
+bool state[4] = {false, false, false, false};
+bool lastReading[4] = {HIGH, HIGH, HIGH, HIGH};
+bool stableReading[4] = {HIGH, HIGH, HIGH, HIGH};
+unsigned long debounceTime[4] = {0, 0, 0, 0};
+
+void setAppliance(int i, bool on, bool sync = true) {
+  state[i] = on;
+  digitalWrite(relays[i], on ? RELAY_ON : RELAY_OFF);
+
+  if (sync && WiFi.status() == WL_CONNECTED) {
+    SinricProSwitch& device = SinricPro[ids[i]];
+    device.sendPowerStateEvent(on);
+  }
+}
+
+bool onPowerState(const String &id, bool &on) {
+  for (int i = 0; i < 4; i++) {
+    if (id == ids[i]) {
+      setAppliance(i, on, false);
+      return true;
+    }
+  }
+  return false;
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  for (int i = 0; i < 4; i++) {
+    digitalWrite(relays[i], RELAY_OFF);
+    pinMode(relays[i], OUTPUT);
+    digitalWrite(relays[i], RELAY_OFF);
+    pinMode(buttons[i], INPUT_PULLUP);
+  }
+
+  IrReceiver.begin(IR_PIN, DISABLE_LED_FEEDBACK);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+  Serial.print("Connecting to Wi-Fi...");
+  unsigned long start = millis();
+
+  while (WiFi.status() != WL_CONNECTED &&
+         millis() - start < 20000) {
+    delay(300);
+    Serial.print(".");
+  }
+
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("Wi-Fi connected");
+
+    for (int i = 0; i < 4; i++) {
+      SinricProSwitch& device = SinricPro[ids[i]];
+      device.onPowerState(onPowerState);
+    }
+
+    SinricPro.begin(APP_KEY, APP_SECRET);
+  }
+
+  Serial.println("Home automation ready");
+}
+
+void loop() {
+  // Manual push buttons
+  for (int i = 0; i < 4; i++) {
+    bool reading = digitalRead(buttons[i]);
+
+    if (reading != lastReading[i]) {
+      debounceTime[i] = millis();
+    }
+
+    if (millis() - debounceTime[i] > 40) {
+      if (reading != stableReading[i]) {
+        stableReading[i] = reading;
+
+        if (stableReading[i] == LOW) {
+          setAppliance(i, !state[i]);
+        }
+      }
+    }
+
+    lastReading[i] = reading;
+  }
+
+  // IR remote control
+  if (IrReceiver.decode()) {
+    uint32_t code =
+      IrReceiver.decodedIRData.decodedRawData;
+
+    Serial.printf("IR code: 0x%08lX\n",
+                  (unsigned long)code);
+
+    if (!(IrReceiver.decodedIRData.flags &
+          IRDATA_FLAGS_IS_REPEAT)) {
+      switch (code) {
+        case 0xBA45FF00:
+          setAppliance(0, !state[0]);
+          break;
+
+        case 0xB946FF00:
+          setAppliance(1, !state[1]);
+          break;
+
+        case 0xB847FF00:
+          setAppliance(2, !state[2]);
+          break;
+
+        case 0xBB44FF00:
+          for (int i = 0; i < 4; i++) {
+            setAppliance(i, false);
+          }
+          break;
+      }
+    }
+
+    IrReceiver.resume();
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    SinricPro.handle();
+  }
+}
